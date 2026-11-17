@@ -1,6 +1,6 @@
 // Service worker: permite usar la app sin conexión.
 // Sirve desde caché y actualiza en segundo plano (los cambios se ven al siguiente arranque).
-const CACHE = 'mis-cuentas-v3';
+const CACHE = 'mis-cuentas-v4';
 const FILES = ['./', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest', 'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', e => {

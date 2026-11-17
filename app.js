@@ -202,7 +202,15 @@ function processRecurring() {
 
 /* ---------------- Estado de la interfaz ---------------- */
 const now0 = new Date();
+const UI_KEY = 'mc.ui';
 const ui = { tab: 'home', y: now0.getFullYear(), m: now0.getMonth(), acc: 'all', ideasType: 'expense' };
+try { // recuerda pestaña, cuenta seleccionada y tipo de Ideas entre recargas
+  const saved = JSON.parse(localStorage.getItem(UI_KEY)) || {};
+  for (const k of ['tab', 'acc', 'ideasType']) if (saved[k]) ui[k] = saved[k];
+} catch (e) { }
+function saveUi() {
+  try { localStorage.setItem(UI_KEY, JSON.stringify({ tab: ui.tab, acc: ui.acc, ideasType: ui.ideasType })); } catch (e) { }
+}
 
 /* ---------------- Iconos SVG ---------------- */
 const svg = p => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${p}</svg>`;
@@ -233,6 +241,9 @@ const I = {
 
 /* ---------------- Render principal ---------------- */
 function render() {
+  if (ui.acc !== 'all' && !acc(ui.acc)) ui.acc = 'all';
+  if (!['home', 'timeline', 'ideas', 'budgets', 'accounts'].includes(ui.tab)) ui.tab = 'home';
+  saveUi();
   applyTheme();
   renderTop(); renderTabs();
   const v = $('#view');
@@ -450,7 +461,7 @@ function openTxForm(existing, mode = 'tx', preset = {}) {
   let keypad = !isEdit;
   const title = mode === 'rule' ? 'Recurrente' : isEdit ? 'Editar transacción' : 'Nueva transacción';
 
-  const render = () => {
+  const renderForm = () => {
     const c = cat(f.cat), a = acc(f.acc), b = acc(f.to), d = new Date(f.date);
     const amt = f.amountStr ? f.amountStr.replace(/\B(?=(\d{3})+(?!\d))/g, '.') : '0';
     const typeBtns = f.type === 'adjust' ? `<div class="typeseg"><button class="on transfer">Ajuste de saldo</button></div>` :
@@ -478,7 +489,7 @@ function openTxForm(existing, mode = 'tx', preset = {}) {
   };
 
   const s = openSheet({
-    cls: 'form', render,
+    cls: 'form', render: renderForm,
     actions: {
       type: (t, s) => { f.type = t.dataset.t; const c = cat(f.cat); if (c && c.type !== f.type) f.cat = null; s.refresh(); },
       key: (t, s) => {
@@ -1099,7 +1110,7 @@ function syncStatus() {
   return 'Sincronizado ' + (m < 1 ? 'ahora mismo' : m < 60 ? `hace ${m} min` : m < 1440 ? `hace ${Math.round(m / 60)} h` : longDate(new Date(sync.lastSync)));
 }
 function openSyncSetup() {
-  const f = { owner: sync?.owner || '', repo: sync?.repo || 'mis-cuentas-datos', token: sync?.token || '' };
+  const f = { owner: sync?.owner || '', repo: sync?.repo || 'savey-data', token: sync?.token || '' };
   let busy = false;
   openSheet({
     cls: 'full',
