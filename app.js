@@ -1,5 +1,5 @@
 'use strict';
-/* Mis Cuentas — app de ingresos y gastos, inspirada en Savey.
+/* SaveyCustom — app de ingresos y gastos, inspirada en Savey.
    Todos los datos viven en el propio dispositivo (localStorage). */
 
 const KEY = 'mc.db.v1';
@@ -848,14 +848,14 @@ async function shareOrDownload(text, name, mime) {
   return true;
 }
 async function exportBackup() {
-  const name = `mis-cuentas-${dayKey(new Date())}.json`;
-  const ok = await shareOrDownload(JSON.stringify({ app: 'mis-cuentas', exportedAt: new Date().toISOString(), ...db }, null, 1), name, 'application/json');
+  const name = `saveycustom-${dayKey(new Date())}.json`;
+  const ok = await shareOrDownload(JSON.stringify({ app: 'saveycustom', exportedAt: new Date().toISOString(), ...db }, null, 1), name, 'application/json');
   if (ok) { db.settings.lastBackup = new Date().toISOString(); save(); render(); toast('Copia de seguridad creada'); }
 }
 function restoreBackup(text) {
   let data;
   try { data = JSON.parse(text); } catch (e) { return alert('El archivo no es una copia válida.'); }
-  if (!Array.isArray(data.transactions) || !Array.isArray(data.accounts) || !Array.isArray(data.categories)) return alert('El archivo no es una copia de Mis Cuentas.');
+  if (!Array.isArray(data.transactions) || !Array.isArray(data.accounts) || !Array.isArray(data.categories)) return alert('El archivo no es una copia de SaveyCustom.');
   if (!confirm(`La copia tiene ${data.transactions.length} transacciones. Se REEMPLAZARÁN los datos actuales (${db.transactions.length} transacciones). ¿Continuar?`)) return;
   delete data.app; delete data.exportedAt;
   db = data; normalize(); processRecurring(); save();
@@ -924,7 +924,7 @@ function exportCsv() {
     const amt = t.type === 'expense' ? -t.amount : t.amount;
     lines.push([t.date, kind, q(cname), q(acc(t.acc)?.name || ''), q(t.to ? acc(t.to)?.name || '' : ''), (amt / 100).toFixed(2), q(t.note || '')].join(','));
   }
-  shareOrDownload('﻿' + lines.join('\n'), `mis-cuentas-${dayKey(new Date())}.csv`, 'text/csv');
+  shareOrDownload('﻿' + lines.join('\n'), `saveycustom-${dayKey(new Date())}.csv`, 'text/csv');
 }
 
 /* ---------------- Menú lateral ---------------- */
