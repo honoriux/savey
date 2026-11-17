@@ -51,8 +51,8 @@ function defaultDB() {
     categories: DEFAULT_CATS.map(([id, name, type, icon, color]) => ({ id, name, type, icon, color })),
     transactions: [],
     recurring: [],
-    budgets: { general: 0, cats: {} },
-    settings: { theme: 'auto', budgetMode: 'income', currency: 'EUR', netWorth: true, decimals: true, counts: true, lastBackup: null, lastAcc: null },
+    budgets: { mode: 'none', general: 0, cats: {} },
+    settings: { theme: 'auto', currency: 'EUR', netWorth: true, decimals: true, counts: true, lastBackup: null, lastAcc: null },
   };
 }
 const SETTINGS_DEFAULT = defaultDB().settings;
@@ -72,6 +72,9 @@ function normalize() {
   db.categories = db.categories || [];
   db.deleted = db.deleted || {};
   db.budgetsU = db.budgetsU || 0;
+  // El presupuesto general es opcional (antes estaba siempre activo según ingresos): por defecto, ninguno
+  if (!['none', 'income', 'fixed'].includes(db.budgets.mode)) db.budgets.mode = 'none';
+  delete db.settings.budgetMode;
 }
 // Guarda un cambio hecho en este dispositivo: marca qué registros cambiaron (para sincronizar) y guarda.
 function save() { stamp(); saveRaw(); scheduleSync(); }
@@ -358,21 +361,27 @@ function viewBudgets() {
     if (t.type === 'income') inc += t.amount;
     if (t.type === 'expense') { exp += t.amount; byCat[t.cat] = (byCat[t.cat] || 0) + t.amount; }
   }
-  const general = db.settings.budgetMode === 'income' ? inc : (db.budgets.general || 0);
+  const mode = db.budgets.mode;
+  const general = mode === 'income' ? inc : (db.budgets.general || 0);
   const left = general - exp;
   const cats = Object.entries(db.budgets.cats).filter(([id]) => cat(id)).map(([id, lim]) => ({ c: cat(id), lim, spent: byCat[id] || 0 }))
     .sort((a, b) => b.spent / b.lim - a.spent / a.lim);
-  return `<button class="bcard" data-act="editGeneral">
-      <div style="display:flex;justify-content:space-between;align-items:baseline"><span class="serif" style="font-size:19px">Presupuesto general</span><span class="small">${db.settings.budgetMode === 'income' ? 'según ingresos' : 'cantidad fija'}</span></div>
+  const del = (act, id = '') => `<button class="iconbtn" style="width:30px;height:30px;color:var(--muted)" data-act="${act}" data-cat="${id}" aria-label="Eliminar presupuesto">${I.close}</button>`;
+  const generalCard = mode === 'none' ? '' : `<div class="bcard" data-act="editGeneral">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><span class="serif" style="font-size:19px;flex:1">Presupuesto general</span><span class="small">${mode === 'income' ? 'según ingresos' : 'cantidad fija'}</span>${del('delGeneral')}</div>
       ${budgetBar(exp, general)}
       <div class="brow"><span>Gastado ${money(exp)} de ${money(general)}</span><span class="${left < 0 ? 'red' : 'green'}">${left < 0 ? 'Te pasas ' + money(-left) : 'Quedan ' + money(left)}</span></div>
-    </button>
-    <h2 class="sec">Por categoría</h2>
-    ${cats.map(({ c, lim, spent }) => `<button class="bcard" data-act="editBudget" data-cat="${c.id}">
-      <div style="display:flex;align-items:center;gap:10px">${ico(c)}<span style="flex:1">${esc(c.name)}</span><span class="small">${Math.round(spent / lim * 100)}%</span></div>
+    </div>`;
+  const catCards = cats.map(({ c, lim, spent }) => `<div class="bcard" data-act="editBudget" data-cat="${c.id}">
+      <div style="display:flex;align-items:center;gap:10px">${ico(c)}<span style="flex:1">${esc(c.name)}</span><span class="small">${Math.round(spent / lim * 100)}%</span>${del('delBudget', c.id)}</div>
       ${budgetBar(spent, lim)}
-      <div class="brow"><span>${money(spent)} de ${money(lim)}</span><span class="${lim - spent < 0 ? 'red' : ''}">${lim - spent < 0 ? 'Te pasas ' + money(spent - lim) : 'Quedan ' + money(lim - spent)}</span></div></button>`).join('')
-    || `<div class="empty-state" style="padding:16px">Aún no tienes presupuestos por categoría.</div>`}
+      <div class="brow"><span>${money(spent)} de ${money(lim)}</span><span class="${lim - spent < 0 ? 'red' : ''}">${lim - spent < 0 ? 'Te pasas ' + money(spent - lim) : 'Quedan ' + money(lim - spent)}</span></div></div>`).join('');
+  if (!generalCard && !catCards) return `<div class="empty-state">No tienes presupuestos.<br>Puedes poner un límite de gasto para todo el mes o para una categoría concreta.</div>
+    <button class="addcard" data-act="editGeneral" style="margin-bottom:12px">+ Presupuesto general</button>
+    <button class="addcard" data-act="addBudget">+ Presupuesto por categoría</button>`;
+  return `${generalCard || `<button class="addcard" data-act="editGeneral" style="margin-bottom:12px">+ Presupuesto general</button>`}
+    <h2 class="sec">Por categoría</h2>
+    ${catCards || `<div class="empty-state" style="padding:16px">Aún no tienes presupuestos por categoría.</div>`}
     <button class="addcard" data-act="addBudget">+ Añadir presupuesto</button>`;
 }
 
@@ -774,15 +783,20 @@ function openBudgetEdit(catId) {
   });
 }
 function openGeneralBudget() {
-  let mode = db.settings.budgetMode, val = db.budgets.general ? centsToInput(db.budgets.general) : '';
+  const had = db.budgets.mode !== 'none';
+  let mode = had ? db.budgets.mode : 'income', val = db.budgets.general ? centsToInput(db.budgets.general) : '';
   openSheet({
     render: () => `${head('Presupuesto general')}
       <div class="seg lg" style="margin:10px 0"><button class="${mode === 'income' ? 'on income' : ''}" data-act="m" data-m="income">Según ingresos del mes</button><button class="${mode === 'fixed' ? 'on expense' : ''}" data-act="m" data-m="fixed">Cantidad fija</button></div>
       ${mode === 'fixed' ? `<div class="field"><label>Cantidad al mes</label><input data-input="v" inputmode="decimal" value="${esc(val)}"></div>` : '<div class="small">El presupuesto de cada mes será lo que hayas ingresado ese mes.</div>'}
-      <div class="form-foot"><button class="btn navy" data-act="save">Guardar</button></div>`,
+      <div class="form-foot">${had ? '<button class="btn ghost" data-act="del">Quitar</button>' : ''}<button class="btn navy" data-act="save">Guardar</button></div>`,
     actions: {
       m: (t, s) => { mode = t.dataset.m; s.refresh(); }, v: t => val = t.value,
-      save: (t, s) => { db.settings.budgetMode = mode; if (mode === 'fixed') db.budgets.general = toCents(val || '0') || 0; save(); s.close(); render(); },
+      del: (t, s) => { db.budgets.mode = 'none'; save(); s.close(); render(); },
+      save: (t, s) => {
+        if (mode === 'fixed') { const v = toCents(val || '0'); if (!v || v < 0) return toast('Importe no válido'); db.budgets.general = v; }
+        db.budgets.mode = mode; save(); s.close(); render();
+      },
     },
   });
 }
@@ -797,7 +811,6 @@ function openSettings() {
     render: () => `${head('Configuración')}
       <div class="set-h">Características</div>
       <div class="set-row"><span class="ic">☾</span><span class="t">Modo oscuro</span><span class="v">${{ light: 'Claro', dark: 'Oscuro', auto: 'Automático' }[st.theme]} ${I.down.replace('<svg', '<svg width="12" height="12"')}</span>${sel('theme', { auto: 'Automático', light: 'Claro', dark: 'Oscuro' })}</div>
-      <div class="set-row"><span class="ic">▤</span><span class="t">Presupuesto general</span><span class="v">${st.budgetMode === 'income' ? 'Ingresos' : 'Fijo'}</span>${sel('budgetMode', { income: 'Ingresos', fixed: 'Fijo' })}</div>
       <div class="set-h">Personalización</div>
       <div class="set-row"><span class="ic">€</span><span class="t">Moneda</span><span class="v">${st.currency}</span>${sel('currency', Object.fromEntries(Object.keys(CURRENCIES).map(k => [k, k])))}</div>
       ${sw('netWorth', 'Valor neto de la cuenta', '▣')}
@@ -961,6 +974,11 @@ const mainActions = {
   newTransfer: () => openTxForm(null, 'tx', { type: 'transfer' }),
   editGeneral: () => openGeneralBudget(),
   editBudget: t => openBudgetEdit(t.dataset.cat),
+  delGeneral: () => { if (!confirm('¿Quitar el presupuesto general?')) return; db.budgets.mode = 'none'; save(); render(); },
+  delBudget: t => {
+    if (!confirm(`¿Quitar el presupuesto de ${cat(t.dataset.cat)?.name || 'esta categoría'}?`)) return;
+    delete db.budgets.cats[t.dataset.cat]; save(); render();
+  },
   addBudget: () => {
     const free = db.categories.filter(c => c.type === 'expense' && !db.budgets.cats[c.id]);
     if (!free.length) return toast('Todas las categorías tienen presupuesto');
