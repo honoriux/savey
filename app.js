@@ -274,6 +274,13 @@ function accRow(short, right = '') {
 }
 function backupBanner() {
   if (!db.transactions.length) return '';
+  if (sync?.token) {
+    // Con sincronización, GitHub ya guarda una copia de todo (y su historial): solo avisar si lleva días sin sincronizar
+    const ls = sync.lastSync ? new Date(sync.lastSync) : null;
+    if (ls && Date.now() - ls.getTime() < 7 * 864e5) return '';
+    if (!ls && !sync.lastError) return '';
+    return `<button class="banner" data-act="settings">⚠️ <span>${ls ? 'No se sincroniza con GitHub desde el ' + longDate(ls).toLowerCase() + '.' : 'No se ha podido sincronizar con GitHub.'}${sync.lastError ? ' ' + esc(sync.lastError) + '.' : ''} <b>Toca para revisarlo.</b></span></button>`;
+  }
   const lb = db.settings.lastBackup ? new Date(db.settings.lastBackup) : null;
   if (lb && Date.now() - lb.getTime() < 30 * 864e5) return '';
   return `<button class="banner" data-act="backup">💾 <span>${lb ? 'Hace más de un mes de tu última copia de seguridad.' : 'Aún no has hecho ninguna copia de seguridad.'} <b>Toca para hacerla ahora.</b></span></button>`;
@@ -818,7 +825,8 @@ function openSettings() {
       ${sw('counts', 'Número de transacciones', '10')}
       <div class="set-h">Sincronización</div>
       <button class="set-row" data-act="syncSetup"><span class="ic">⇅</span><span class="t">${sync?.token ? 'GitHub: ' + esc(sync.owner + '/' + sync.repo) : 'Sincronizar entre dispositivos'}<div class="small">${esc(syncStatus())}</div></span>›</button>
-      ${sync?.token ? '<button class="set-row" data-act="syncNow"><span class="ic">⟳</span><span class="t">Sincronizar ahora</span></button>' : ''}
+      ${sync?.token ? `<button class="set-row" data-act="syncNow"><span class="ic">⟳</span><span class="t">Sincronizar ahora</span></button>
+        <button class="set-row" data-act="monthly"><span class="ic">🗓</span><span class="t">Copias mensuales en GitHub<div class="small">${sync.lastSnapshot ? 'Última: ' + esc(sync.lastSnapshot) : 'Se hará en la próxima sincronización'}</div></span>›</button>` : ''}
       <div class="set-h">Datos</div>
       <button class="set-row" data-act="backup"><span class="ic">☁︎</span><span class="t">Copia de seguridad<div class="small">${st.lastBackup ? 'Última: ' + longDate(new Date(st.lastBackup)) : 'Nunca'}</div></span>›</button>
       <button class="set-row" data-act="restore"><span class="ic">⤓</span><span class="t">Restaurar copia de seguridad</span>›</button>
@@ -832,6 +840,7 @@ function openSettings() {
       toggle: (t, s) => { st[t.dataset.k] = !st[t.dataset.k]; save(); s.refresh(); render(); },
       syncSetup: () => openSyncSetup(),
       syncNow: (t, s) => { const p = syncNow(); s.refresh(); p.then(() => toast(sync?.lastError ? 'Error al sincronizar' : 'Sincronizado')); },
+      monthly: () => openMonthlyBackups(),
       backup: (t, s) => exportBackup().then(() => s.refresh()),
       restore: () => pickFile('.json,application/json', restoreBackup),
       exportCsv: () => exportCsv(),
@@ -860,9 +869,10 @@ async function shareOrDownload(text, name, mime) {
   document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
   return true;
 }
+const backupJson = () => JSON.stringify({ app: 'saveycustom', exportedAt: new Date().toISOString(), ...db }, null, 1);
 async function exportBackup() {
   const name = `saveycustom-${dayKey(new Date())}.json`;
-  const ok = await shareOrDownload(JSON.stringify({ app: 'saveycustom', exportedAt: new Date().toISOString(), ...db }, null, 1), name, 'application/json');
+  const ok = await shareOrDownload(backupJson(), name, 'application/json');
   if (ok) { db.settings.lastBackup = new Date().toISOString(); save(); render(); toast('Copia de seguridad creada'); }
 }
 function restoreBackup(text) {
@@ -1069,9 +1079,9 @@ function ghError(res) {
   if (res.status === 404) return 'No se encuentra el repositorio (revisa usuario, nombre y permisos del token)';
   return 'Error de GitHub ' + res.status;
 }
-async function pullRemote(cfg = sync) {
-  const r = await gh(`/contents/${SYNC_FILE}`, {}, cfg);
-  if (r.status === 404) return { sha: null, data: null };
+async function getFile(path, cfg = sync) {
+  const r = await gh(`/contents/${path}`, {}, cfg);
+  if (r.status === 404) return { sha: null, text: null };
   if (!r.ok) throw new Error(ghError(r));
   const j = await r.json();
   let b64 = j.content;
@@ -1080,7 +1090,52 @@ async function pullRemote(cfg = sync) {
     if (!b.ok) throw new Error(ghError(b));
     b64 = (await b.json()).content;
   }
-  return { sha: j.sha, data: JSON.parse(b64dec(b64)) };
+  return { sha: j.sha, text: b64dec(b64) };
+}
+async function pullRemote(cfg = sync) {
+  const { sha, text } = await getFile(SYNC_FILE, cfg);
+  return { sha, data: text === null ? null : JSON.parse(text) };
+}
+
+/* Copia mensual: la primera sincronización de cada mes guarda en copias/AAAA-MM.json
+   una copia completa (como la de "Copia de seguridad"). Nunca se sobrescribe. */
+const BACKUP_DIR = 'copias';
+async function monthlySnapshot() {
+  const d = new Date(), key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  if (sync.lastSnapshot === key) return;
+  const res = await gh(`/contents/${BACKUP_DIR}/${key}.json`, {
+    method: 'PUT',
+    body: JSON.stringify({ message: `Copia mensual ${key} (desde ${deviceName})`, content: b64enc(backupJson()) }),
+  });
+  // 422 = ya existe (la hizo otro dispositivo este mes): también vale
+  if (res.ok || res.status === 422) sync.lastSnapshot = key;
+  else throw new Error('No se pudo guardar la copia mensual: ' + ghError(res));
+}
+function openMonthlyBackups() {
+  let files = null, error = null;
+  const monthName = n => { const m = n.match(/^(\d{4})-(\d{2})/); return m ? `${MONTHS_L[+m[2] - 1][0].toUpperCase() + MONTHS_L[+m[2] - 1].slice(1)} ${m[1]}` : n; };
+  const s = openSheet({
+    cls: 'full',
+    render: () => `${head('Copias mensuales', 'En GitHub · ' + esc(sync.repo) + '/' + BACKUP_DIR)}
+      <p class="small">Cada mes, la primera vez que se sincroniza, se guarda una copia completa. Restaurar una copia reemplaza los datos actuales en todos tus dispositivos.</p>
+      ${error ? `<div class="empty-state">⚠️ ${esc(error)}</div>` : files === null ? '<div class="empty-state">Cargando…</div>' : !files.length ? '<div class="empty-state">Aún no hay copias mensuales.</div>' :
+        files.map(f => `<button class="row" data-act="restore" data-path="${esc(f.path)}"><span class="ico" style="background:var(--line)">🗓️</span><div class="main"><div class="name">${esc(monthName(f.name))}</div><div class="sub">${Math.round(f.size / 1024)} KB</div></div><span class="chev">›</span></button>`).join('')}`,
+    actions: {
+      restore: async t => {
+        try {
+          toast('Descargando copia…');
+          const { text } = await getFile(t.dataset.path);
+          if (text === null) throw new Error('La copia ya no existe');
+          restoreBackup(text);
+        } catch (e) { alert(e.message || String(e)); }
+      },
+    },
+  });
+  gh(`/contents/${BACKUP_DIR}`).then(async r => {
+    if (r.status === 404) files = [];
+    else if (!r.ok) error = ghError(r);
+    else files = (await r.json()).filter(f => f.type === 'file' && f.name.endsWith('.json')).sort((a, b) => b.name.localeCompare(a.name));
+  }).catch(e => error = e.message).finally(() => sheets.includes(s) && s.refresh());
 }
 function applyRemote(newDb) {
   const changed = canon(newDb) !== canon(db);
@@ -1111,6 +1166,7 @@ async function syncNow() {
       throw new Error(ghError(res));
     }
     sync.lastSync = new Date().toISOString(); sync.lastError = null;
+    await monthlySnapshot();
   } catch (e) {
     sync.lastError = e.message || String(e);
   } finally {
