@@ -62,6 +62,7 @@ function load() {
   try { db = JSON.parse(localStorage.getItem(KEY)); } catch (e) { db = null; }
   if (!db || !Array.isArray(db.transactions)) db = defaultDB();
   normalize();
+  takeSnap();
 }
 function normalize() {
   db.settings = Object.assign({}, SETTINGS_DEFAULT, db.settings || {});
@@ -69,10 +70,36 @@ function normalize() {
   db.recurring = db.recurring || [];
   db.accounts = db.accounts || [];
   db.categories = db.categories || [];
+  db.deleted = db.deleted || {};
+  db.budgetsU = db.budgetsU || 0;
 }
-function save() {
+// Guarda un cambio hecho en este dispositivo: marca qué registros cambiaron (para sincronizar) y guarda.
+function save() { stamp(); saveRaw(); scheduleSync(); }
+function saveRaw() {
   try { localStorage.setItem(KEY, JSON.stringify(db)); }
   catch (e) { alert('No se pudieron guardar los datos: ' + e.message); }
+  takeSnap();
+}
+
+/* Seguimiento de cambios por registro: cada registro lleva "u" (última modificación)
+   y los borrados quedan en db.deleted, para poder combinar los datos de varios dispositivos. */
+const SYNC_FIELDS = ['accounts', 'categories', 'transactions', 'recurring'];
+let snap = new Map();
+const stripU = r => { const { u, ...rest } = r; return JSON.stringify(rest); };
+function takeSnap() {
+  snap = new Map();
+  for (const k of SYNC_FIELDS) for (const r of db[k]) snap.set(r.id, stripU(r));
+  snap.set('__budgets', JSON.stringify(db.budgets));
+}
+function stamp() {
+  const now = Date.now(), seen = new Set();
+  db.deleted = db.deleted || {};
+  for (const k of SYNC_FIELDS) for (const r of db[k]) {
+    seen.add(r.id);
+    if (snap.get(r.id) !== stripU(r)) r.u = now;
+  }
+  for (const id of snap.keys()) if (id !== '__budgets' && !seen.has(id)) db.deleted[id] = now;
+  if (snap.get('__budgets') !== JSON.stringify(db.budgets)) db.budgetsU = now;
 }
 
 /* ---------------- Utilidades ---------------- */
@@ -162,7 +189,10 @@ function processRecurring() {
   for (const r of db.recurring) {
     let guard = 0;
     while (new Date(r.next).getTime() <= now && guard++ < 2000) {
-      db.transactions.push({ id: uid(), type: r.type, amount: r.amount, cat: r.cat, acc: r.acc, to: r.to, date: r.next, note: r.note || '', rec: r.id });
+      // id determinista: si dos dispositivos generan la misma repetición, al sincronizar no se duplica
+      const id = `${r.id}_${r.next.slice(0, 10)}`;
+      if (!db.transactions.some(t => t.id === id) && !db.deleted?.[id])
+        db.transactions.push({ id, type: r.type, amount: r.amount, cat: r.cat, acc: r.acc, to: r.to, date: r.next, note: r.note || '', rec: r.id });
       advance(r); n++;
     }
   }
@@ -181,7 +211,16 @@ const I = {
   left: svg('<path d="M15 5l-7 7 7 7"/>'),
   right: svg('<path d="M9 5l7 7-7 7"/>'),
   down: svg('<path d="M6 9l6 6 6-6"/>'),
-  gear: svg('<circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/>'),
+  gear: (() => {
+    // Engranaje de 8 dientes generado como polígono
+    const pts = []; const N = 8;
+    for (let i = 0; i < N * 4; i++) {
+      const a = (i / (N * 4)) * Math.PI * 2 - Math.PI / 2 + Math.PI / (N * 4);
+      const r = (i % 4 === 0 || i % 4 === 1) ? 10 : 7.6;
+      pts.push(`${(12 + r * Math.cos(a)).toFixed(2)},${(12 + r * Math.sin(a)).toFixed(2)}`);
+    }
+    return `<svg viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M${pts.join('L')}Z M12 8.6a3.4 3.4 0 1 0 0.001 0Z"/></svg>`;
+  })(),
   close: svg('<path d="M6 6l12 12M18 6L6 18"/>'),
   wallet: svg('<rect x="3" y="5" width="18" height="15" rx="2.5"/><path d="M16 12.5h2.5M3 9h18"/>'),
   list: svg('<path d="M8 6h12M8 12h12M8 18h12"/><circle cx="4" cy="6" r=".6" fill="currentColor"/><circle cx="4" cy="12" r=".6" fill="currentColor"/><circle cx="4" cy="18" r=".6" fill="currentColor"/>'),
@@ -753,6 +792,9 @@ function openSettings() {
       ${sw('netWorth', 'Valor neto de la cuenta', '▣')}
       ${sw('decimals', 'Mostrar decimales dobles', '.00')}
       ${sw('counts', 'Número de transacciones', '10')}
+      <div class="set-h">Sincronización</div>
+      <button class="set-row" data-act="syncSetup"><span class="ic">⇅</span><span class="t">${sync?.token ? 'GitHub: ' + esc(sync.owner + '/' + sync.repo) : 'Sincronizar entre dispositivos'}<div class="small">${esc(syncStatus())}</div></span>›</button>
+      ${sync?.token ? '<button class="set-row" data-act="syncNow"><span class="ic">⟳</span><span class="t">Sincronizar ahora</span></button>' : ''}
       <div class="set-h">Datos</div>
       <button class="set-row" data-act="backup"><span class="ic">☁︎</span><span class="t">Copia de seguridad<div class="small">${st.lastBackup ? 'Última: ' + longDate(new Date(st.lastBackup)) : 'Nunca'}</div></span>›</button>
       <button class="set-row" data-act="restore"><span class="ic">⤓</span><span class="t">Restaurar copia de seguridad</span>›</button>
@@ -764,12 +806,14 @@ function openSettings() {
     actions: {
       set: (t, s) => { st[t.dataset.k] = t.value; save(); s.refresh(); render(); },
       toggle: (t, s) => { st[t.dataset.k] = !st[t.dataset.k]; save(); s.refresh(); render(); },
+      syncSetup: () => openSyncSetup(),
+      syncNow: (t, s) => { const p = syncNow(); s.refresh(); p.then(() => toast(sync?.lastError ? 'Error al sincronizar' : 'Sincronizado')); },
       backup: (t, s) => exportBackup().then(() => s.refresh()),
       restore: () => pickFile('.json,application/json', restoreBackup),
       exportCsv: () => exportCsv(),
       importCsv: () => pickFile('.csv,text/csv,text/comma-separated-values', importSaveyCsv),
       reset: (t, s) => {
-        if (!confirm('Se borrarán TODOS los datos de este dispositivo. ¿Seguro?')) return;
+        if (!confirm(sync?.token ? 'Se borrarán TODOS los datos, también en GitHub y en el resto de dispositivos sincronizados. ¿Seguro?' : 'Se borrarán TODOS los datos de este dispositivo. ¿Seguro?')) return;
         if (!confirm('Última confirmación: ¿has hecho una copia de seguridad? Esta acción no se puede deshacer.')) return;
         db = defaultDB(); save(); ui.acc = 'all'; s.close(); render(); toast('Datos restablecidos');
       },
@@ -936,11 +980,180 @@ function applyTheme() {
   document.querySelector('meta[name=theme-color]').content = dark ? '#17181c' : '#f3eeeb';
 }
 
+/* ---------------- Sincronización con un repositorio privado de GitHub ----------------
+   La configuración (con el token) se guarda aparte y nunca entra en las copias de seguridad. */
+const SYNC_KEY = 'mc.sync';
+const SYNC_FILE = 'datos.json';
+let sync = null;
+try { sync = JSON.parse(localStorage.getItem(SYNC_KEY)); } catch (e) { }
+let syncing = false, syncAgain = false, syncTimer = null;
+const saveSyncCfg = () => { try { localStorage.setItem(SYNC_KEY, JSON.stringify(sync)); } catch (e) { } };
+const deviceName = /iPhone|iPad/.test(navigator.userAgent) ? 'iPhone' : /Windows/.test(navigator.userAgent) ? 'Windows' : 'navegador';
+
+const b64enc = s => {
+  const bytes = new TextEncoder().encode(s); let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+};
+const b64dec = b => new TextDecoder().decode(Uint8Array.from(atob(b.replace(/\s/g, '')), c => c.charCodeAt(0)));
+
+function syncPayload(d) {
+  return { version: 1, accounts: d.accounts, categories: d.categories, transactions: d.transactions, recurring: d.recurring, budgets: d.budgets, budgetsU: d.budgetsU || 0, deleted: d.deleted || {} };
+}
+// Representación ordenada por id, para comparar contenidos sin que importe el orden
+function canon(d) {
+  const p = syncPayload(d), o = {};
+  for (const k of SYNC_FIELDS) o[k] = [...(p[k] || [])].sort((a, b) => a.id < b.id ? -1 : 1);
+  o.budgets = p.budgets; o.budgetsU = p.budgetsU; o.deleted = Object.keys(p.deleted).sort().map(k => [k, p.deleted[k]]);
+  return JSON.stringify(o);
+}
+// Combina registro a registro: gana la versión modificada más recientemente; los borrados se respetan.
+function mergeData(L, R) {
+  const out = { ...L }, del = { ...(R.deleted || {}) };
+  for (const [id, t] of Object.entries(L.deleted || {})) del[id] = Math.max(del[id] || 0, t);
+  const dead = r => del[r.id] && del[r.id] >= (r.u || 0);
+  for (const k of SYNC_FIELDS) {
+    const rm = new Map((R[k] || []).map(r => [r.id, r])), seen = new Set(), res = [];
+    for (const l of L[k] || []) {
+      const r = rm.get(l.id); seen.add(l.id);
+      const pick = r && (r.u || 0) > (l.u || 0) ? r : l;
+      if (!dead(pick)) res.push(pick);
+    }
+    for (const r of R[k] || []) if (!seen.has(r.id) && !dead(r)) res.push(r);
+    out[k] = res;
+  }
+  out.deleted = del;
+  if ((R.budgetsU || 0) > (L.budgetsU || 0)) { out.budgets = R.budgets; out.budgetsU = R.budgetsU; }
+  return out;
+}
+
+async function gh(path, opts = {}, cfg = sync) {
+  const res = await fetch(`https://api.github.com/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}${path}`, {
+    ...opts, cache: 'no-store',
+    headers: { Authorization: `Bearer ${cfg.token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', ...(opts.body ? { 'Content-Type': 'application/json' } : {}) },
+  });
+  return res;
+}
+function ghError(res) {
+  if (res.status === 401) return 'El token no es válido o ha caducado';
+  if (res.status === 403) return 'El token no tiene permiso de escritura en el repositorio';
+  if (res.status === 404) return 'No se encuentra el repositorio (revisa usuario, nombre y permisos del token)';
+  return 'Error de GitHub ' + res.status;
+}
+async function pullRemote(cfg = sync) {
+  const r = await gh(`/contents/${SYNC_FILE}`, {}, cfg);
+  if (r.status === 404) return { sha: null, data: null };
+  if (!r.ok) throw new Error(ghError(r));
+  const j = await r.json();
+  let b64 = j.content;
+  if (!b64 || j.encoding === 'none') { // archivos de más de 1 MB
+    const b = await gh(`/git/blobs/${j.sha}`, {}, cfg);
+    if (!b.ok) throw new Error(ghError(b));
+    b64 = (await b.json()).content;
+  }
+  return { sha: j.sha, data: JSON.parse(b64dec(b64)) };
+}
+function applyRemote(newDb) {
+  const changed = canon(newDb) !== canon(db);
+  db = newDb; normalize(); saveRaw();
+  if (processRecurring()) return true;
+  return changed;
+}
+function scheduleSync(delay = 1500) {
+  if (!sync?.token) return;
+  clearTimeout(syncTimer); syncTimer = setTimeout(syncNow, delay);
+}
+async function syncNow() {
+  clearTimeout(syncTimer); syncTimer = null;
+  if (!sync?.token || !navigator.onLine) return;
+  if (syncing) { syncAgain = true; return; }
+  syncing = true; let changed = false;
+  try {
+    for (let attempt = 0; ; attempt++) {
+      const { sha, data } = await pullRemote();
+      if (data) changed = applyRemote(mergeData(db, data)) || changed;
+      if (data && canon(data) === canon(db)) break; // la nube ya está al día
+      const res = await gh(`/contents/${SYNC_FILE}`, {
+        method: 'PUT',
+        body: JSON.stringify({ message: `Cambios desde ${deviceName}`, content: b64enc(JSON.stringify(syncPayload(db))), ...(sha ? { sha } : {}) }),
+      });
+      if (res.ok) break;
+      if ((res.status === 409 || res.status === 422) && attempt < 3) continue; // otro dispositivo subió algo a la vez: reintentar
+      throw new Error(ghError(res));
+    }
+    sync.lastSync = new Date().toISOString(); sync.lastError = null;
+  } catch (e) {
+    sync.lastError = e.message || String(e);
+  } finally {
+    syncing = false; saveSyncCfg();
+    if (changed) render(); else sheets.forEach(s => s.live && s.refresh());
+    if (syncAgain) { syncAgain = false; scheduleSync(300); }
+  }
+}
+function syncStatus() {
+  if (!sync?.token) return 'Desactivada';
+  if (syncing) return 'Sincronizando…';
+  if (sync.lastError) return '⚠️ ' + sync.lastError;
+  if (!sync.lastSync) return 'Pendiente';
+  const m = Math.round((Date.now() - new Date(sync.lastSync)) / 60000);
+  return 'Sincronizado ' + (m < 1 ? 'ahora mismo' : m < 60 ? `hace ${m} min` : m < 1440 ? `hace ${Math.round(m / 60)} h` : longDate(new Date(sync.lastSync)));
+}
+function openSyncSetup() {
+  const f = { owner: sync?.owner || '', repo: sync?.repo || 'mis-cuentas-datos', token: sync?.token || '' };
+  let busy = false;
+  openSheet({
+    cls: 'full',
+    render: () => `${head('Sincronización')}
+      <p class="small">Tus datos se guardan en un repositorio <b>privado</b> de tu cuenta de GitHub, y todos los dispositivos conectados ven lo mismo. Cada cambio queda en el historial del repositorio, así que también sirve de copia de seguridad.</p>
+      <div class="field"><label>Usuario de GitHub</label><input data-input="owner" value="${esc(f.owner)}" autocapitalize="off" autocorrect="off" spellcheck="false"></div>
+      <div class="field"><label>Repositorio privado</label><input data-input="repo" value="${esc(f.repo)}" autocapitalize="off" autocorrect="off" spellcheck="false"></div>
+      <div class="field"><label>Token</label><input data-input="token" type="password" value="${esc(f.token)}" placeholder="github_pat_…" autocapitalize="off" autocorrect="off" spellcheck="false"></div>
+      <p class="small">El token se guarda solo en este dispositivo y no se incluye en las copias de seguridad.</p>
+      <div class="form-foot">${sync?.token ? '<button class="btn ghost" data-act="off">Desconectar</button>' : ''}<button class="btn navy" data-act="connect">${busy ? 'Conectando…' : sync?.token ? 'Guardar' : 'Conectar'}</button></div>`,
+    actions: {
+      owner: t => f.owner = t.value.trim(), repo: t => f.repo = t.value.trim(), token: t => f.token = t.value.trim(),
+      off: (t, s) => {
+        if (!confirm('¿Desconectar este dispositivo? Los datos se quedan aquí y en GitHub, pero dejarán de sincronizarse.')) return;
+        sync = null; localStorage.removeItem(SYNC_KEY); s.close(); render();
+      },
+      connect: async (t, s) => {
+        if (busy) return;
+        if (!f.owner || !f.repo || !f.token) return toast('Rellena los tres campos');
+        const cfg = { owner: f.owner, repo: f.repo, token: f.token };
+        busy = true; s.refresh();
+        try {
+          const r = await gh('', {}, cfg);
+          if (!r.ok) throw new Error(ghError(r));
+          const info = await r.json();
+          if (!info.private) throw new Error('El repositorio es PÚBLICO. Hazlo privado (Settings → General → Change visibility) antes de guardar tus datos en él.');
+          const { data } = await pullRemote(cfg);
+          if (data && data.transactions?.length) {
+            const replace = confirm(`En GitHub ya hay datos (${data.transactions.length} movimientos).\n\nAceptar: usar los de GitHub y descartar los de este dispositivo (${db.transactions.length} movimientos). Recomendado si este no es tu dispositivo principal.\n\nCancelar: combinar ambos.`);
+            if (replace) { db = { ...data, settings: db.settings }; normalize(); saveRaw(); }
+          }
+          sync = { ...cfg, lastSync: null, lastError: null }; saveSyncCfg();
+          busy = false; s.close();
+          await syncNow(); render();
+          toast(sync.lastError ? 'Error al sincronizar' : 'Sincronización activada');
+        } catch (e) {
+          busy = false; s.refresh(); alert(e.message || String(e));
+        }
+      },
+    },
+  });
+}
+
 /* ---------------- Arranque ---------------- */
 load();
 processRecurring();
 render();
-document.addEventListener('visibilitychange', () => { if (!document.hidden && processRecurring()) render(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { if (syncTimer) syncNow(); return; } // sube lo pendiente antes de que iOS congele la app
+  if (processRecurring()) render();
+  syncNow();
+});
+window.addEventListener('online', () => syncNow());
+syncNow();
 matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', applyTheme);
 if (navigator.storage?.persist) navigator.storage.persist().catch(() => { });
 if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => { });
